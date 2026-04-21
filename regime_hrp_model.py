@@ -4,6 +4,8 @@ Regime-aware HRP: blends covariances based on HHMM regime probabilities.
 
 import numpy as np
 import pandas as pd
+import scipy.cluster.hierarchy as sch
+import scipy.spatial.distance as ssd
 from hrp_model import HRPAllocator
 import config
 
@@ -15,15 +17,12 @@ class RegimeHRPAllocator:
     def compute_blended_covariance(self, returns: pd.DataFrame, regime_probs: dict) -> pd.DataFrame:
         """
         Blend covariances from short, medium, and long windows.
-        regime_probs: {'macro_prob': float, 'sector_prob': float, ...}
-        We map the first three HHMM probabilities to [stress, neutral, calm].
         """
         windows = config.COV_WINDOWS
         short_cov = returns.iloc[-windows['short']:].cov()
         medium_cov = returns.iloc[-windows['medium']:].cov()
         long_cov = returns.iloc[-windows['long']:].cov()
 
-        # Extract probabilities (default if missing)
         probs = [
             regime_probs.get('macro_prob', config.DEFAULT_REGIME_PROBS[0]),
             regime_probs.get('sector_prob', config.DEFAULT_REGIME_PROBS[1]),
@@ -42,7 +41,6 @@ class RegimeHRPAllocator:
                  defensive_only: bool = False) -> dict:
         """
         Compute HRP weights using regime-blended covariance.
-        If defensive_only, restrict to defensive tickers.
         """
         tickers = returns.columns.tolist()
         if defensive_only:
@@ -55,17 +53,14 @@ class RegimeHRPAllocator:
             return {returns.columns[0]: 1.0} if returns.shape[1] == 1 else {}
 
         blended_cov = self.compute_blended_covariance(returns, regime_probs)
-        # Convert covariance back to returns-like data for HRP (it only needs covariance)
-        # HRP uses returns to compute cov; we bypass by overriding allocate
-        # Simpler: pass returns but use blended_cov inside a custom allocator
         allocator = HRPAllocator(linkage_method=self.linkage_method)
         allocator.original_tickers = tickers
 
         corr = blended_cov.corr()
-        dist = scipy.spatial.distance.squareform(((1 - corr) / 2) ** 0.5)
-        allocator.linkage = scipy.cluster.hierarchy.linkage(dist, method=self.linkage_method)
+        dist = ssd.squareform(((1 - corr) / 2) ** 0.5)
+        allocator.linkage = sch.linkage(dist, method=self.linkage_method)
 
-        ordered_indices = scipy.cluster.hierarchy.leaves_list(allocator.linkage)
+        ordered_indices = sch.leaves_list(allocator.linkage)
         ordered_tickers = [tickers[i] for i in ordered_indices]
 
         cov_ordered = blended_cov.loc[ordered_tickers, ordered_tickers]
