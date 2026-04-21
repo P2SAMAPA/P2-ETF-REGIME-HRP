@@ -5,7 +5,6 @@ Regime-aware HRP: blends covariances based on HHMM regime probabilities.
 import numpy as np
 import pandas as pd
 import scipy.cluster.hierarchy as sch
-import scipy.spatial.distance as ssd
 from hrp_model import HRPAllocator
 import config
 
@@ -14,21 +13,21 @@ class RegimeHRPAllocator:
         self.linkage_method = linkage_method
         self.base_allocator = HRPAllocator(linkage_method=linkage_method)
 
-    def compute_blended_covariance(self, returns: pd.DataFrame, regime_probs: dict) -> pd.DataFrame:
+    def compute_blended_covariance(self, returns: pd.DataFrame, regime_probs: dict) -> np.ndarray:
         """
         Blend covariances from short, medium, and long windows.
+        Returns a plain NumPy array (symmetric, positive semi-definite).
         """
         windows = config.COV_WINDOWS
         
-        # Ensure we have enough data for each window
         n = len(returns)
         short_n = min(windows['short'], n)
         medium_n = min(windows['medium'], n)
         long_n = min(windows['long'], n)
         
-        short_cov = returns.iloc[-short_n:].cov()
-        medium_cov = returns.iloc[-medium_n:].cov()
-        long_cov = returns.iloc[-long_n:].cov()
+        short_cov = returns.iloc[-short_n:].cov().values
+        medium_cov = returns.iloc[-medium_n:].cov().values
+        long_cov = returns.iloc[-long_n:].cov().values
 
         probs = [
             regime_probs.get('macro_prob', config.DEFAULT_REGIME_PROBS[0]),
@@ -43,11 +42,11 @@ class RegimeHRPAllocator:
 
         blended = probs[0] * short_cov + probs[1] * medium_cov + probs[2] * long_cov
         
-        # Ensure symmetry (fix floating-point asymmetries)
+        # Symmetrize
         blended = (blended + blended.T) / 2
         
-        # Add small ridge for numerical stability
-        np.fill_diagonal(blended.values, blended.values.diagonal() + 1e-8)
+        # Ridge for numerical stability
+        np.fill_diagonal(blended, blended.diagonal() + 1e-8)
         
         return blended
 
@@ -57,7 +56,6 @@ class RegimeHRPAllocator:
         Compute HRP weights using regime-blended covariance.
         """
         tickers = returns.columns.tolist()
-        original_tickers = tickers.copy()
         
         if defensive_only:
             defensive = [t for t in config.DEFENSIVE_TICKERS if t in tickers]
@@ -65,20 +63,18 @@ class RegimeHRPAllocator:
                 returns = returns[defensive]
                 tickers = defensive
 
-        if returns.shape[1] < 2:
-            if returns.shape[1] == 1:
+        n_assets = returns.shape[1]
+        if n_assets < 2:
+            if n_assets == 1:
                 return {returns.columns[0]: 1.0}
             return {}
 
-        blended_cov = self.compute_blended_covariance(returns, regime_probs)
-        allocator = HRPAllocator(linkage_method=self.linkage_method)
-        allocator.original_tickers = tickers
-
-        # Convert covariance to correlation
-        std = np.sqrt(np.diag(blended_cov))
-        corr = blended_cov / np.outer(std, std)
+        # Blended covariance as numpy array
+        cov = self.compute_blended_covariance(returns, regime_probs)
         
-        # Clip to valid range and ensure symmetry
+        # Convert to correlation
+        std = np.sqrt(np.diag(cov))
+        corr = cov / np.outer(std, std)
         corr = np.clip(corr, -1.0, 1.0)
         corr = (corr + corr.T) / 2
         np.fill_diagonal(corr, 1.0)
@@ -86,27 +82,25 @@ class RegimeHRPAllocator:
         # Distance matrix
         dist = np.sqrt((1 - corr) / 2)
         np.fill_diagonal(dist, 0.0)
-        dist = (dist + dist.T) / 2  # ensure symmetry
-        
-        # Convert to condensed form
-        try:
-            condensed_dist = ssd.squareform(dist, checks=False)
-        except:
-            # Fallback: manually compute condensed
-            n = len(tickers)
-            condensed_dist = []
-            for i in range(n):
-                for j in range(i+1, n):
-                    condensed_dist.append(dist[i, j])
-            condensed_dist = np.array(condensed_dist)
+        dist = (dist + dist.T) / 2
 
-        allocator.linkage = sch.linkage(condensed_dist, method=self.linkage_method)
+        # Condensed distance for linkage
+        condensed = []
+        for i in range(n_assets):
+            for j in range(i+1, n_assets):
+                condensed.append(dist[i, j])
+        condensed = np.array(condensed)
 
-        ordered_indices = sch.leaves_list(allocator.linkage)
+        linkage = sch.linkage(condensed, method=self.linkage_method)
+        ordered_indices = sch.leaves_list(linkage)
         ordered_tickers = [tickers[i] for i in ordered_indices]
 
-        cov_ordered = blended_cov.loc[ordered_tickers, ordered_tickers]
+        # Build ordered covariance DataFrame for HRP (needed by base allocator)
+        cov_ordered = pd.DataFrame(cov, index=tickers, columns=tickers).loc[ordered_tickers, ordered_tickers]
+        
+        allocator = HRPAllocator(linkage_method=self.linkage_method)
+        allocator.original_tickers = ordered_tickers
+        allocator.linkage = linkage
         weights = allocator._recursive_bisection(cov_ordered)
         
-        # Map back to original ticker list (if defensive filtered, only those appear)
         return dict(zip(ordered_tickers, weights))
