@@ -4,7 +4,7 @@ Data loading and preprocessing for REGIME-HRP engine.
 
 import pandas as pd
 import numpy as np
-from huggingface_hub import hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download
 import config
 
 def load_master_data() -> pd.DataFrame:
