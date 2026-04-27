@@ -1,6 +1,5 @@
 """
-Main training script for REGIME-HRP engine.
-Blends covariances using HHMM regime probabilities and computes HRP weights.
+Main training script – Daily, Global, and Shrinking modes.
 """
 
 import json
@@ -12,92 +11,122 @@ import data_manager
 from regime_hrp_model import RegimeHRPAllocator
 import push_results
 
-def get_top_n_weights(weights_dict: dict, n: int = 5) -> dict:
-    sorted_items = sorted(weights_dict.items(), key=lambda x: x[1], reverse=True)[:n]
-    top = dict(sorted_items)
-    total = sum(top.values())
-    return {k: v / total for k, v in top.items()}
+def get_top_n_weights(weights, n=5):
+    sorted_items = sorted(weights.items(), key=lambda x: x[1], reverse=True)[:n]
+    total = sum(w for _, w in sorted_items)
+    return {t: w / total for t, w in sorted_items}
 
-def run_regime_hrp():
-    print(f"=== P2-ETF-REGIME-HRP Run: {config.TODAY} ===")
-    df_master = data_manager.load_master_data()
-    df_master['Date'] = pd.to_datetime(df_master['Date'])
-    df_master = df_master.sort_values('Date')
-
-    # Load external regime signals
-    hhmm_regime = data_manager.load_hhmm_regime_probs()
-    tail_warning = data_manager.load_evt_tail_warning() if config.USE_TAIL_WARNING_GATE else False
-    print(f"HHMM regime: {hhmm_regime}")
-    print(f"Tail warning active: {tail_warning}")
+def run_allocation(returns, macro_df=None):
+    """Run regime HRP allocation on a data slice."""
+    if len(returns) < config.MIN_OBSERVATIONS:
+        return None
 
     allocator = RegimeHRPAllocator(linkage_method=config.LINKAGE_METHOD)
 
-    all_weights = {}
-    top5_weights = {}
-    cluster_info = {}
+    # Get regime classification
+    if macro_df is not None and 'VIX' in macro_df.columns:
+        regime = data_manager.get_vix_based_regime(macro_df)
+    elif 'VIX' in returns.columns:
+        regime = data_manager.get_vix_based_regime(returns)
+    else:
+        regime = {'stress': 0.2, 'neutral': 0.6, 'calm': 0.2}
 
-    for universe_name, tickers in config.UNIVERSES.items():
-        print(f"\n--- Processing Universe: {universe_name} ---")
-        returns = data_manager.prepare_returns_matrix(df_master, tickers)
-        if len(returns) < config.MIN_OBSERVATIONS:
-            continue
+    # Defensive gating based on regime
+    defensive_only = regime['stress'] > 0.5 and config.USE_REGIME_GATING
 
-        weights = allocator.allocate(returns, hhmm_regime, defensive_only=tail_warning)
-        all_weights[universe_name] = weights
-        top5 = get_top_n_weights(weights, n=5)
-        top5_weights[universe_name] = top5
+    # Filter out macro columns for HRP
+    etf_cols = [c for c in returns.columns if c in config.ALL_TICKERS]
+    returns_etf = returns[etf_cols]
 
-        linkage, original_tickers = allocator.base_allocator.get_linkage_and_labels()
-        if linkage is not None and original_tickers is not None:
-            cluster_info[universe_name] = {
-                "linkage": linkage.tolist(),
-                "original_tickers": original_tickers
-            }
+    weights = allocator.allocate(returns_etf, regime, defensive_only=defensive_only)
+    top5 = get_top_n_weights(weights, n=5)
 
-        print(f"  Top 5: {list(top5.keys())}")
-
-    # Shrinking windows (simplified)
-    shrinking_results = {}
-    for start_year in config.SHRINKING_WINDOW_START_YEARS:
-        start_date = pd.Timestamp(f"{start_year}-01-01")
-        window_label = f"{start_year}-{start_year+2}"
-        mask = df_master['Date'] >= start_date
-        df_window = df_master[mask].copy()
-        if len(df_window) < config.MIN_OBSERVATIONS:
-            continue
-
-        window_top = {}
-        for universe_name, tickers in config.UNIVERSES.items():
-            returns_win = data_manager.prepare_returns_matrix(df_window, tickers)
-            if len(returns_win) < config.MIN_OBSERVATIONS:
-                continue
-            weights_win = allocator.allocate(returns_win, hhmm_regime, defensive_only=False)
-            top = get_top_n_weights(weights_win, n=1)
-            if top:
-                window_top[universe_name] = list(top.keys())[0]
-
-        shrinking_results[window_label] = {
-            'start_year': start_year,
-            'top_pick': window_top
-        }
-
-    output_payload = {
-        "run_date": config.TODAY,
-        "config": {
-            "cov_windows": config.COV_WINDOWS,
-            "linkage_method": config.LINKAGE_METHOD,
-            "tail_warning_active": tail_warning
-        },
-        "daily_trading": {
-            "full_weights": all_weights,
-            "top5_weights": top5_weights,
-            "cluster_info": cluster_info
-        },
-        "shrinking_windows": shrinking_results
+    return {
+        'full_weights': weights,
+        'top5_weights': top5,
+        'regime': regime,
+        'defensive_mode': defensive_only,
+        'training_start': str(returns.index[0].date()),
+        'training_end': str(returns.index[-1].date())
     }
 
-    push_results.push_daily_result(output_payload)
+
+def main():
+    import os
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        print("HF_TOKEN not set")
+        return
+
+    df_master = data_manager.load_master_data()
+    df_master['Date'] = pd.to_datetime(df_master['Date'])
+
+    all_results = {}
+
+    for universe_name, tickers in config.UNIVERSES.items():
+        print(f"\n=== {universe_name} ===")
+        returns_all = data_manager.prepare_returns_matrix(df_master, tickers)
+        if len(returns_all) < config.MIN_OBSERVATIONS:
+            continue
+
+        # Add VIX column for regime detection (if available)
+        if 'VIX' in df_master.columns:
+            returns_all = returns_all.join(df_master[['Date','VIX']].set_index('Date').loc[returns_all.index])
+
+        universe_out = {}
+
+        # Daily (504d)
+        daily_ret = returns_all.iloc[-config.DAILY_LOOKBACK:]
+        daily_out = run_allocation(daily_ret, daily_ret)
+        if daily_out:
+            universe_out['daily'] = daily_out
+            print(f"  Daily top: {list(daily_out['top5_weights'].keys())[0]}")
+
+        # Global (2008‑YTD)
+        global_mask = df_master['Date'] >= config.GLOBAL_TRAIN_START
+        global_ret = returns_all.loc[returns_all.index.isin(df_master[global_mask]['Date'])]
+        global_out = run_allocation(global_ret, global_ret)
+        if global_out:
+            universe_out['global'] = global_out
+            print(f"  Global top: {list(global_out['top5_weights'].keys())[0]}")
+
+        # Shrinking Windows
+        shrinking_windows = []
+        for start_year in config.SHRINKING_WINDOW_START_YEARS:
+            sd = pd.Timestamp(f"{start_year}-01-01")
+            ed = sd + pd.Timedelta(days=config.DAILY_LOOKBACK * 2)
+            mask = (df_master['Date'] >= sd) & (df_master['Date'] <= ed)
+            ret_win = returns_all.loc[returns_all.index.isin(df_master[mask]['Date'])]
+            if len(ret_win) < config.MIN_OBSERVATIONS:
+                continue
+            out = run_allocation(ret_win.iloc[:config.DAILY_LOOKBACK], ret_win.iloc[:config.DAILY_LOOKBACK])
+            if out:
+                shrinking_windows.append({
+                    'window_start': start_year,
+                    'window_end': start_year + 2,
+                    'top_ticker': list(out['top5_weights'].keys())[0],
+                    'regime': out['regime']
+                })
+
+        if shrinking_windows:
+            # Consensus across windows
+            vote = {}
+            for w in shrinking_windows:
+                vote[w['top_ticker']] = vote.get(w['top_ticker'], 0) + 1
+            pick = max(vote, key=vote.get)
+            conviction = vote[pick] / len(shrinking_windows) * 100
+            universe_out['shrinking'] = {
+                'ticker': pick,
+                'conviction': conviction,
+                'num_windows': len(shrinking_windows),
+                'windows': shrinking_windows
+            }
+
+        all_results[universe_name] = universe_out
+
+    push_results.push_daily_result({"run_date": config.TODAY, "universes": all_results})
     print("\n=== Run Complete ===")
 
+
 if __name__ == "__main__":
-    run_regime_hrp()
+    main()
