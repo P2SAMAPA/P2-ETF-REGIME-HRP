@@ -4,7 +4,7 @@ Data loading and preprocessing for REGIME-HRP engine.
 
 import pandas as pd
 import numpy as np
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import hf_hub_download
 import config
 
 def load_master_data() -> pd.DataFrame:
@@ -23,7 +23,7 @@ def load_master_data() -> pd.DataFrame:
     return df
 
 def prepare_returns_matrix(df_wide: pd.DataFrame, tickers: list) -> pd.DataFrame:
-    """Prepare a wide-format DataFrame of log returns with Date index."""
+    """Prepare wide‑format log returns."""
     available_tickers = [t for t in tickers if t in df_wide.columns]
     df_long = pd.melt(
         df_wide, id_vars=['Date'], value_vars=available_tickers,
@@ -36,45 +36,23 @@ def prepare_returns_matrix(df_wide: pd.DataFrame, tickers: list) -> pd.DataFrame
     df_long = df_long.dropna(subset=['log_return'])
     return df_long.pivot(index='Date', columns='ticker', values='log_return')[available_tickers].dropna()
 
-def load_hhmm_regime_probs() -> dict:
-    """Fetch latest HHMM regime probabilities from HF."""
-    try:
-        api = HfApi(token=config.HF_TOKEN)
-        files = api.list_repo_files(repo_id=config.HF_HHMM_REPO, repo_type="dataset")
-        json_files = sorted([f for f in files if f.endswith('.json')], reverse=True)
-        if not json_files:
-            return {}
-        local = hf_hub_download(
-            repo_id=config.HF_HHMM_REPO, filename=json_files[0],
-            repo_type="dataset", token=config.HF_TOKEN, cache_dir="./hf_cache"
-        )
-        import json
-        with open(local) as f:
-            data = json.load(f)
-        return data.get('regime', {})
-    except Exception as e:
-        print(f"Could not load HHMM regime: {e}")
-        return {}
+def get_vix_based_regime(returns: pd.DataFrame, vix_col: str = 'VIX') -> dict:
+    """
+    Classify the current market regime based on VIX level.
+    Returns blending probabilities [stress, neutral, calm].
+    """
+    if vix_col not in returns.columns:
+        return {'stress': 0.2, 'neutral': 0.6, 'calm': 0.2}
 
-def load_evt_tail_warning() -> bool:
-    """Check if any ETF has tail warning active."""
-    try:
-        api = HfApi(token=config.HF_TOKEN)
-        files = api.list_repo_files(repo_id=config.HF_EVT_REPO, repo_type="dataset")
-        json_files = sorted([f for f in files if f.endswith('.json')], reverse=True)
-        if not json_files:
-            return False
-        local = hf_hub_download(
-            repo_id=config.HF_EVT_REPO, filename=json_files[0],
-            repo_type="dataset", token=config.HF_TOKEN, cache_dir="./hf_cache"
-        )
-        import json
-        with open(local) as f:
-            data = json.load(f)
-        for universe in data.get('universes', {}).values():
-            for vals in universe.values():
-                if vals.get('tail_warning', 0) == 1:
-                    return True
-        return False
-    except:
-        return False
+    latest_vix = returns[vix_col].iloc[-1]
+    if latest_vix >= config.VIX_STRESS_THRESHOLD:
+        probs = {'stress': 0.7, 'neutral': 0.2, 'calm': 0.1}
+    elif latest_vix <= config.VIX_CALM_THRESHOLD:
+        probs = {'stress': 0.1, 'neutral': 0.2, 'calm': 0.7}
+    else:
+        probs = {'stress': 0.2, 'neutral': 0.6, 'calm': 0.2}
+
+    probs['stress'] = float(probs['stress'])
+    probs['neutral'] = float(probs['neutral'])
+    probs['calm'] = float(probs['calm'])
+    return probs
