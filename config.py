@@ -25,7 +25,7 @@ UNIVERSES = {
     "COMBINED": ALL_TICKERS
 }
 
-# Defensive ETFs (used when stress regime)
+# Defensive ETFs (only when stress gating is active)
 DEFENSIVE_TICKERS = ["TLT", "LQD", "XLP", "XLU", "XLV"]
 
 # --- HRP Parameters ---
@@ -37,6 +37,12 @@ COV_WINDOWS = {"short": 63, "medium": 252, "long": 504}
 VIX_STRESS_THRESHOLD = 28.0
 VIX_CALM_THRESHOLD = 16.0
 USE_REGIME_GATING = True              # restrict to defensive ETFs in stress
+
+# --- Return‑Tilt Parameters ---
+USE_RETURN_TILT = True                # enable Sortino‑based weighting
+RETURN_TILT_METRIC = "sortino"        # "sortino" or "sharpe"
+TILT_LOOKBACK = 126                   # days for computing the metric
+RISK_FREE_RATE_ANNUAL = 0.02          # for Sortino/Sharpe
 
 # --- Training Modes ---
 DAILY_LOOKBACK = 504
