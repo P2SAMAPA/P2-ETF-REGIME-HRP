@@ -8,12 +8,7 @@ from datetime import datetime
 # --- Hugging Face Repositories ---
 HF_DATA_REPO = "P2SAMAPA/fi-etf-macro-signal-master-data"
 HF_DATA_FILE = "master_data.parquet"
-
 HF_OUTPUT_REPO = "P2SAMAPA/p2-etf-regime-hrp-results"
-
-# HHMM and EVT repositories (for regime signals)
-HF_HHMM_REPO = "P2SAMAPA/p2-etf-hhmm-regime-results"
-HF_EVT_REPO = "P2SAMAPA/p2-etf-evt-tailrisk-results"
 
 # --- Universe Definitions ---
 FI_COMMODITIES_TICKERS = ["TLT", "VCIT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
@@ -30,27 +25,22 @@ UNIVERSES = {
     "COMBINED": ALL_TICKERS
 }
 
-# Defensive ETF list (used when tail warning active)
+# Defensive ETFs (used when stress regime)
 DEFENSIVE_TICKERS = ["TLT", "LQD", "XLP", "XLU", "XLV"]
 
 # --- HRP Parameters ---
 LINKAGE_METHOD = "ward"
 MIN_OBSERVATIONS = 252
+COV_WINDOWS = {"short": 63, "medium": 252, "long": 504}
 
-# Covariance blending windows (trading days)
-COV_WINDOWS = {
-    "short": 63,    # 3 months
-    "medium": 252,  # 1 year
-    "long": 504     # 2 years
-}
+# --- Regime Classification (self‑contained VIX‑based) ---
+VIX_STRESS_THRESHOLD = 28.0
+VIX_CALM_THRESHOLD = 16.0
+USE_REGIME_GATING = True              # restrict to defensive ETFs in stress
 
-# Default regime probabilities if HHMM unavailable
-DEFAULT_REGIME_PROBS = [0.2, 0.6, 0.2]  # [stress, neutral, calm]
-
-# Tail warning gate
-USE_TAIL_WARNING_GATE = True
-
-# --- Shrinking Windows ---
+# --- Training Modes ---
+DAILY_LOOKBACK = 504
+GLOBAL_TRAIN_START = "2008-01-01"
 SHRINKING_WINDOW_START_YEARS = list(range(2010, 2025))
 
 # --- Date Handling ---
