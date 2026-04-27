@@ -53,15 +53,17 @@ def display_allocation(weights, title):
     if not weights:
         st.info("No weights available.")
         return
-    # Convert to DataFrame and format weights as percentages
     df = pd.DataFrame(weights.items(), columns=['Ticker', 'Weight'])
     df = df.sort_values('Weight', ascending=False)
-    df['Weight'] = df['Weight'].apply(lambda x: f"{x:.2%}")   # format as percentage string
     
-    fig = go.Figure(go.Pie(labels=df['Ticker'], values=[float(w.strip('%'))/100 for w in df['Weight']], hole=0.4))
+    fig = go.Figure(go.Pie(labels=df['Ticker'], values=df['Weight'], hole=0.4))
     fig.update_layout(title=title, height=400)
     st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Format weights as percentages for display
+    df_display = df.copy()
+    df_display['Weight'] = df_display['Weight'].apply(lambda x: f"{x:.2%}")
+    st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 def render_mode_tab(mode_data, mode_name):
     if not mode_data:
@@ -71,7 +73,7 @@ def render_mode_tab(mode_data, mode_name):
     defensive = mode_data.get('defensive_mode', False)
 
     st.markdown(f"### {mode_name}")
-    st.markdown(f"Regime: {regime_badge(regime)} {'🛡️ Defensive' if defensive else ''}")
+    st.markdown(f"Regime: {regime_badge(regime)} {'🛡️ Defensive' if defensive else ''}", unsafe_allow_html=True)
 
     top5 = mode_data.get('top5_weights', {})
     if top5:
