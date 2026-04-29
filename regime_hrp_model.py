@@ -114,7 +114,14 @@ class RegimeHRPAllocator:
 
     def _allocate_with_tilt(self, returns, blended_cov, scores, tickers):
         """Custom HRP allocation that uses score/variance for leaf weights."""
+        # Get correlation matrix from blended covariance
         corr = blended_cov.corr().values
+
+        # --- FIX: enforce symmetry and clamp to [-1, 1] to avoid sqrt(negative) ---
+        corr = (corr + corr.T) / 2
+        corr = np.clip(corr, -1.0, 1.0)
+
+        # Now compute distance matrix safely
         dist = np.sqrt((1 - corr) / 2)
         np.fill_diagonal(dist, 0)
         condensed = ssd.squareform(dist)
